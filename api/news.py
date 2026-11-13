@@ -1,0 +1,164 @@
+"""Vercel Python serverless function: GET /api/news?topic=plan
+
+Pulls Google News RSS search results for a fixed set of urban-planning /
+real-estate-policy topics, classifies each item into one of 17 Korean
+regions by keyword matching on the title, dedupes, and returns JSON.
+
+No API key required: Google News RSS is a public search feed.
+"""
+import json
+import re
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler
+
+TOPIC_QUERIES = {
+    "plan": "도시계획",
+    "development": "도시개발 OR 택지개발",
+    "redevelop": "재개발 OR 재건축",
+    "realestate": "부동산 정책",
+    "national": "국토교통부",
+}
+
+REGION_KEYWORDS = [
+    ("seoul", ["서울", "강남구", "강북구", "강서구", "강동구", "송파구", "서초구", "마포구",
+               "영등포", "용산구", "종로구", "중구", "성동구", "광진구", "동대문구", "중랑구",
+               "성북구", "도봉구", "노원구", "은평구", "서대문구", "양천구", "구로구", "금천구",
+               "동작구", "관악구"]),
+    ("gyeonggi", ["경기도", "경기", "수원", "성남", "고양", "용인", "부천", "안산", "안양",
+                  "남양주", "화성", "평택", "의정부", "시흥", "파주", "김포", "광명", "군포",
+                  "이천", "양주", "오산", "구리", "안성", "포천", "의왕", "하남", "여주",
+                  "양평", "동두천", "과천", "가평", "연천"]),
+    ("incheon", ["인천", "연수구", "남동구", "부평", "계양", "미추홀", "강화", "옹진"]),
+    ("gangwon", ["강원도", "강원", "춘천", "원주", "강릉", "동해", "태백", "속초", "삼척",
+                 "홍천", "횡성", "영월", "평창", "정선", "철원", "화천", "양구", "인제",
+                 "고성군", "양양"]),
+    ("daejeon", ["대전", "유성구", "대덕구"]),
+    ("sejong", ["세종"]),
+    ("chungbuk", ["충북", "청주", "충주", "제천", "진천", "음성", "증평", "괴산", "보은",
+                  "옥천", "영동", "단양"]),
+    ("chungnam", ["충남", "천안", "아산", "서산", "논산", "공주", "보령", "당진", "계룡",
+                  "금산", "부여", "청양", "홍성", "예산", "태안"]),
+    ("gwangju", ["광주광역시", "광주시", "광주"]),
+    ("jeonbuk", ["전북", "전주", "군산", "익산", "정읍", "남원", "김제", "완주", "고창",
+                 "부안", "임실", "순창", "진안", "무주", "장수"]),
+    ("jeonnam", ["전남", "목포", "여수", "순천", "나주", "광양", "담양", "곡성", "구례",
+                 "고흥", "보성", "화순", "장흥", "강진", "해남", "영암", "무안", "함평",
+                 "영광", "장성", "완도", "진도", "신안"]),
+    ("daegu", ["대구", "수성구", "달서구", "달성군"]),
+    ("gyeongbuk", ["경북", "포항", "경주", "김천", "안동", "구미", "영주", "영천", "상주",
+                   "문경", "경산", "군위", "의성", "청송", "영양", "영덕", "청도", "고령",
+                   "성주", "칠곡", "예천", "봉화", "울진", "울릉"]),
+    ("busan", ["부산", "해운대", "수영구", "동래구"]),
+    ("ulsan", ["울산"]),
+    ("gyeongnam", ["경남", "창원", "진주", "통영", "사천", "김해", "밀양", "거제", "양산",
+                   "의령", "함안", "창녕", "남해", "하동", "산청", "함양", "거창", "합천"]),
+    ("jeju", ["제주", "서귀포"]),
+]
+
+REGION_LABELS = {
+    "seoul": "서울", "gyeonggi": "경기", "incheon": "인천", "gangwon": "강원",
+    "daejeon": "대전", "sejong": "세종", "chungbuk": "충북", "chungnam": "충남",
+    "gwangju": "광주", "jeonbuk": "전북", "jeonnam": "전남", "daegu": "대구",
+    "gyeongbuk": "경북", "busan": "부산", "ulsan": "울산", "gyeongnam": "경남",
+    "jeju": "제주",
+}
+
+
+def classify_region(title):
+    for code, keywords in REGION_KEYWORDS:
+        for kw in keywords:
+            if kw in title:
+                return code
+    return ""
+
+
+def fetch_rss(query, days=14):
+    q = f"{query} when:{days}d"
+    url = (
+        "https://news.google.com/rss/search?q="
+        + urllib.parse.quote(q)
+        + "&hl=ko&gl=KR&ceid=KR:ko"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        return resp.read()
+
+
+def parse_items(xml_bytes):
+    root = ET.fromstring(xml_bytes)
+    ns = {"media": "http://search.yahoo.com/mrss/"}
+    out = []
+    for item in root.findall(".//item"):
+        raw_title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        pub_date = (item.findtext("pubDate") or "").strip()
+        source_el = item.find("source")
+        source = source_el.text.strip() if source_el is not None and source_el.text else ""
+
+        title = raw_title
+        if source and title.endswith(" - " + source):
+            title = title[: -(len(source) + 3)].strip()
+        else:
+            title = re.sub(r"\s-\s[^-]{1,40}$", "", title).strip()
+
+        try:
+            dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z")
+            published_at = dt.replace(tzinfo=timezone.utc).isoformat()
+        except Exception:
+            published_at = pub_date
+
+        out.append({
+            "title": title,
+            "link": link,
+            "source": source,
+            "publishedAt": published_at,
+            "region": classify_region(title),
+        })
+    return out
+
+
+def dedupe(items):
+    seen = set()
+    result = []
+    for it in items:
+        key = re.sub(r"\s+", "", it["title"])[:40]
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(it)
+    return result
+
+
+class handler(BaseHTTPRequestHandler):
+    def _send_json(self, status, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "s-maxage=3600, stale-while-revalidate=21600")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        topic = (qs.get("topic") or ["plan"])[0]
+        query = TOPIC_QUERIES.get(topic, TOPIC_QUERIES["plan"])
+
+        try:
+            raw = fetch_rss(query)
+            items = parse_items(raw)
+            items = dedupe(items)
+            items.sort(key=lambda x: x["publishedAt"], reverse=True)
+            return self._send_json(200, {
+                "ok": True,
+                "topic": topic,
+                "items": items[:80],
+                "regionLabels": REGION_LABELS,
+            })
+        except Exception as e:  # noqa: BLE001
+            return self._send_json(502, {"ok": False, "error": str(e)})
