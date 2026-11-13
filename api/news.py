@@ -9,6 +9,7 @@ No API key required: this is Bing's public news-search RSS feed, intended
 for personal, non-commercial RSS-reader use per its own feed terms.
 """
 import json
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -160,13 +161,111 @@ def dedupe(items):
     return result
 
 
+# --- storage (Supabase/Neon Postgres, provisioned via Vercel Storage) ---
+# The daily cron job (api/cron/collect.py) writes here; this module's own
+# handler reads from it first and only falls back to a live Bing fetch if
+# the table is empty or the database isn't reachable (first boot, outage).
+
+def _dsn(url_env):
+    return os.environ.get(url_env) or os.environ.get("POSTGRES_URL")
+
+
+def get_conn(url_env="POSTGRES_URL"):
+    import psycopg2
+    dsn = _dsn(url_env)
+    if not dsn:
+        raise RuntimeError("no database configured (POSTGRES_URL missing)")
+    return psycopg2.connect(dsn, connect_timeout=5)
+
+
+def ensure_schema(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS articles (
+                id BIGSERIAL PRIMARY KEY,
+                dedupe_key TEXT UNIQUE NOT NULL,
+                topic TEXT NOT NULL,
+                title TEXT NOT NULL,
+                link TEXT NOT NULL,
+                source TEXT,
+                image TEXT,
+                region TEXT,
+                published_at TIMESTAMPTZ,
+                collected_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_articles_topic_pub ON articles (topic, published_at DESC)"
+        )
+    conn.commit()
+
+
+def upsert_articles(conn, topic, items):
+    inserted = 0
+    with conn.cursor() as cur:
+        for it in items:
+            if not it.get("title") or not it.get("link"):
+                continue
+            dedupe_key = topic + "|" + re.sub(r"\s+", "", it["title"])[:60]
+            cur.execute(
+                """
+                INSERT INTO articles (dedupe_key, topic, title, link, source, image, region, published_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (dedupe_key) DO NOTHING
+                """,
+                (
+                    dedupe_key, topic, it["title"], it["link"],
+                    it.get("source") or "", it.get("image") or "",
+                    it.get("region") or "", it.get("publishedAt"),
+                ),
+            )
+            if cur.rowcount:
+                inserted += 1
+    conn.commit()
+    return inserted
+
+
+def prune_old(conn, days=16):
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM articles WHERE published_at < now() - (%s || ' days')::interval",
+            (days,),
+        )
+    conn.commit()
+
+
+def query_articles(conn, topic, limit=200):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT title, link, source, image, region, published_at
+            FROM articles WHERE topic = %s
+            ORDER BY published_at DESC NULLS LAST
+            LIMIT %s
+            """,
+            (topic, limit),
+        )
+        rows = cur.fetchall()
+    out = []
+    for title, link, source, image, region, published_at in rows:
+        out.append({
+            "title": title,
+            "link": link,
+            "source": source,
+            "image": image,
+            "region": region or "",
+            "publishedAt": published_at.isoformat() if published_at else None,
+        })
+    return out
+
+
 class handler(BaseHTTPRequestHandler):
     def _send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Cache-Control", "s-maxage=3600, stale-while-revalidate=21600")
+        self.send_header("Cache-Control", "s-maxage=300, stale-while-revalidate=1800")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -175,10 +274,30 @@ class handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(parsed.query)
         topic = (qs.get("topic") or ["plan"])[0]
-        query = TOPIC_QUERIES.get(topic, TOPIC_QUERIES["plan"])
+        queries = TOPIC_QUERIES.get(topic, TOPIC_QUERIES["plan"])
 
+        # 1) try the database (fast, no Bing calls — filled by the daily cron job)
         try:
-            items = fetch_many(query)
+            conn = get_conn()
+            try:
+                items = query_articles(conn, topic)
+            finally:
+                conn.close()
+            if items:
+                return self._send_json(200, {
+                    "ok": True,
+                    "topic": topic,
+                    "items": items,
+                    "regionLabels": REGION_LABELS,
+                    "source": "db",
+                })
+        except Exception:
+            pass  # DB not configured / empty / unreachable — fall through
+
+        # 2) fallback: fetch live from Bing (first boot before the cron has run,
+        #    or a DB outage) so the site never just shows nothing
+        try:
+            items = fetch_many(queries)
             items = dedupe(items)
             items.sort(key=lambda x: x["publishedAt"], reverse=True)
             return self._send_json(200, {
@@ -186,6 +305,7 @@ class handler(BaseHTTPRequestHandler):
                 "topic": topic,
                 "items": items[:80],
                 "regionLabels": REGION_LABELS,
+                "source": "live",
             })
         except Exception as e:  # noqa: BLE001
             return self._send_json(502, {"ok": False, "error": str(e)})
