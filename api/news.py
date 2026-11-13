@@ -17,11 +17,14 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 
 TOPIC_QUERIES = {
-    "plan": "도시계획",
-    "development": "도시개발 OR 택지개발",
-    "redevelop": "재개발 OR 재건축",
-    "realestate": "부동산 정책",
-    "national": "국토교통부",
+    # Bing's news-search RSS doesn't honor boolean "OR" (it's treated as a
+    # literal word), so topics that need multiple keywords list them
+    # separately and the results are fetched per-keyword and merged.
+    "plan": ["도시계획"],
+    "development": ["도시개발", "택지개발"],
+    "redevelop": ["재개발", "재건축"],
+    "realestate": ["부동산 정책"],
+    "national": ["국토교통부"],
 }
 
 REGION_KEYWORDS = [
@@ -87,17 +90,18 @@ def fetch_rss(query, first=1):
         return resp.read()
 
 
-def fetch_many(query, pages=5):
+def fetch_many(queries, pages_per_query=3):
     items = []
-    for i in range(pages):
-        try:
-            raw = fetch_rss(query, first=1 + i * 10)
-        except Exception:
-            continue
-        try:
-            items.extend(parse_items(raw))
-        except ET.ParseError:
-            continue
+    for query in queries:
+        for i in range(pages_per_query):
+            try:
+                raw = fetch_rss(query, first=1 + i * 10)
+            except Exception:
+                continue
+            try:
+                items.extend(parse_items(raw))
+            except ET.ParseError:
+                continue
     return items
 
 
