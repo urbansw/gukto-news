@@ -307,7 +307,6 @@ class handler(BaseHTTPRequestHandler):
         queries = TOPIC_QUERIES.get(topic, TOPIC_QUERIES["plan"])
 
         # 1) try the database (fast, no Bing calls — filled by the daily cron job)
-        debug_key = qs.get("debug", [""])[0]
         try:
             conn = get_conn(url_env="POSTGRES_URL_NON_POOLING")
             try:
@@ -322,11 +321,7 @@ class handler(BaseHTTPRequestHandler):
                     "regionLabels": REGION_LABELS,
                     "source": "db",
                 })
-            elif debug_key and debug_key == os.environ.get("CRON_SECRET"):
-                return self._send_json(200, {"ok": False, "debug_error": "db query returned 0 rows"})
-        except Exception as e:  # noqa: BLE001
-            if debug_key and debug_key == os.environ.get("CRON_SECRET"):
-                return self._send_json(200, {"ok": False, "debug_error": str(e)})
+        except Exception:
             pass  # DB not configured / empty / unreachable — fall through
 
         # 2) fallback: fetch live from Bing (first boot before the cron has run,
