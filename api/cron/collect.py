@@ -45,7 +45,7 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             news.ensure_schema(conn)
-            by_topic = news.fetch_all_topics(news.TOPIC_QUERIES, pages_per_query=3)
+            by_topic = news.fetch_all_topics(news.TOPIC_QUERIES, pages_per_query=2)
             summary = {}
             for topic, items in by_topic.items():
                 items = news.dedupe(items)
