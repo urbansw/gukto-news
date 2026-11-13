@@ -45,9 +45,9 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             news.ensure_schema(conn)
+            by_topic = news.fetch_all_topics(news.TOPIC_QUERIES, pages_per_query=3)
             summary = {}
-            for topic, queries in news.TOPIC_QUERIES.items():
-                items = news.fetch_many(queries, pages_per_query=3)
+            for topic, items in by_topic.items():
                 items = news.dedupe(items)
                 inserted = news.upsert_articles(conn, topic, items)
                 summary[topic] = {"fetched": len(items), "inserted": inserted}

@@ -92,12 +92,25 @@ def fetch_rss(query, first=1):
 
 
 def fetch_many(queries, pages_per_query=3):
+    return fetch_all_topics({"_": queries}, pages_per_query=pages_per_query)["_"]
+
+
+def fetch_all_topics(topic_queries, pages_per_query=3):
+    """Fetch every (topic, query, page) job across ALL topics in one shared
+    thread pool, instead of one topic at a time — so wall-clock time is
+    roughly one parallel batch, not num_topics batches in a row (this is
+    what kept the daily cron job over Vercel's 60s function limit)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    jobs = [(query, 1 + i * 10) for query in queries for i in range(pages_per_query)]
+    jobs = [
+        (topic, query, 1 + i * 10)
+        for topic, queries in topic_queries.items()
+        for query in queries
+        for i in range(pages_per_query)
+    ]
 
     def _one(job):
-        query, first = job
+        _, query, first = job
         try:
             raw = fetch_rss(query, first=first)
         except Exception:
@@ -107,11 +120,12 @@ def fetch_many(queries, pages_per_query=3):
         except ET.ParseError:
             return []
 
-    items = []
-    with ThreadPoolExecutor(max_workers=min(8, len(jobs) or 1)) as pool:
-        for fut in as_completed(pool.submit(_one, job) for job in jobs):
-            items.extend(fut.result())
-    return items
+    by_topic = {topic: [] for topic in topic_queries}
+    with ThreadPoolExecutor(max_workers=min(24, len(jobs) or 1)) as pool:
+        futs = {pool.submit(_one, job): job[0] for job in jobs}
+        for fut in as_completed(futs):
+            by_topic[futs[fut]].extend(fut.result())
+    return by_topic
 
 
 def _local(tag):
@@ -209,26 +223,34 @@ def ensure_schema(conn):
 
 
 def upsert_articles(conn, topic, items):
-    inserted = 0
+    from psycopg2.extras import execute_values
+
+    rows = []
+    for it in items:
+        if not it.get("title") or not it.get("link"):
+            continue
+        dedupe_key = topic + "|" + re.sub(r"\s+", "", it["title"])[:60]
+        rows.append((
+            dedupe_key, topic, it["title"], it["link"],
+            it.get("source") or "", it.get("image") or "",
+            it.get("region") or "", it.get("publishedAt"),
+        ))
+    if not rows:
+        return 0
+
     with conn.cursor() as cur:
-        for it in items:
-            if not it.get("title") or not it.get("link"):
-                continue
-            dedupe_key = topic + "|" + re.sub(r"\s+", "", it["title"])[:60]
-            cur.execute(
-                """
-                INSERT INTO articles (dedupe_key, topic, title, link, source, image, region, published_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (dedupe_key) DO NOTHING
-                """,
-                (
-                    dedupe_key, topic, it["title"], it["link"],
-                    it.get("source") or "", it.get("image") or "",
-                    it.get("region") or "", it.get("publishedAt"),
-                ),
-            )
-            if cur.rowcount:
-                inserted += 1
+        result = execute_values(
+            cur,
+            """
+            INSERT INTO articles (dedupe_key, topic, title, link, source, image, region, published_at)
+            VALUES %s
+            ON CONFLICT (dedupe_key) DO NOTHING
+            RETURNING id
+            """,
+            rows,
+            fetch=True,
+        )
+        inserted = len(result)
     conn.commit()
     return inserted
 
