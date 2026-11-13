@@ -75,9 +75,25 @@
       a.target = "_blank";
       a.rel = "noopener noreferrer";
 
-      const avatar = document.createElement("div");
-      avatar.className = "card-avatar";
-      avatar.textContent = (it.source || "?").slice(0, 1);
+      let avatar;
+      if (it.image) {
+        avatar = document.createElement("img");
+        avatar.className = "card-thumb";
+        avatar.src = it.image;
+        avatar.loading = "lazy";
+        avatar.alt = "";
+        avatar.referrerPolicy = "no-referrer";
+        avatar.addEventListener("error", () => {
+          const fallback = document.createElement("div");
+          fallback.className = "card-avatar";
+          fallback.textContent = (it.source || "?").slice(0, 1);
+          avatar.replaceWith(fallback);
+        });
+      } else {
+        avatar = document.createElement("div");
+        avatar.className = "card-avatar";
+        avatar.textContent = (it.source || "?").slice(0, 1);
+      }
 
       const body = document.createElement("div");
       body.className = "card-body";

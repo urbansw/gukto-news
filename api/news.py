@@ -1,10 +1,12 @@
 """Vercel Python serverless function: GET /api/news?topic=plan
 
-Pulls Google News RSS search results for a fixed set of urban-planning /
-real-estate-policy topics, classifies each item into one of 17 Korean
-regions by keyword matching on the title, dedupes, and returns JSON.
+Pulls Bing News RSS search results (title, link, source, thumbnail) for a
+fixed set of urban-planning / real-estate-policy topics, classifies each
+item into one of 17 Korean regions by keyword matching on the title,
+dedupes, and returns JSON.
 
-No API key required: Google News RSS is a public search feed.
+No API key required: this is Bing's public news-search RSS feed, intended
+for personal, non-commercial RSS-reader use per its own feed terms.
 """
 import json
 import re
@@ -75,34 +77,55 @@ def classify_region(title):
     return ""
 
 
-def fetch_rss(query, days=14):
-    q = f"{query} when:{days}d"
+def fetch_rss(query, first=1):
     url = (
-        "https://news.google.com/rss/search?q="
-        + urllib.parse.quote(q)
-        + "&hl=ko&gl=KR&ceid=KR:ko"
+        "https://www.bing.com/news/search?q=" + urllib.parse.quote(query)
+        + "&format=rss&first=" + str(first)
     )
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=8) as resp:
         return resp.read()
 
 
+def fetch_many(query, pages=5):
+    items = []
+    for i in range(pages):
+        try:
+            raw = fetch_rss(query, first=1 + i * 10)
+        except Exception:
+            continue
+        try:
+            items.extend(parse_items(raw))
+        except ET.ParseError:
+            continue
+    return items
+
+
+def _local(tag):
+    """Strip a '{namespace}Name' Clark-notation tag down to 'Name'.
+
+    Bing's RSS declares the News: namespace URI as the request URL itself
+    (including the query string), so it differs per request and can't be
+    matched with a fixed namespace dict — comparing local names instead.
+    """
+    return tag.rsplit("}", 1)[-1]
+
+
 def parse_items(xml_bytes):
     root = ET.fromstring(xml_bytes)
-    ns = {"media": "http://search.yahoo.com/mrss/"}
     out = []
     for item in root.findall(".//item"):
-        raw_title = (item.findtext("title") or "").strip()
+        title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
         pub_date = (item.findtext("pubDate") or "").strip()
-        source_el = item.find("source")
-        source = source_el.text.strip() if source_el is not None and source_el.text else ""
-
-        title = raw_title
-        if source and title.endswith(" - " + source):
-            title = title[: -(len(source) + 3)].strip()
-        else:
-            title = re.sub(r"\s-\s[^-]{1,40}$", "", title).strip()
+        source = ""
+        image = ""
+        for child in item:
+            name = _local(child.tag)
+            if name == "Source" and child.text:
+                source = child.text.strip()
+            elif name == "Image" and child.text:
+                image = child.text.strip()
 
         try:
             dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z")
@@ -114,6 +137,7 @@ def parse_items(xml_bytes):
             "title": title,
             "link": link,
             "source": source,
+            "image": image,
             "publishedAt": published_at,
             "region": classify_region(title),
         })
@@ -150,8 +174,7 @@ class handler(BaseHTTPRequestHandler):
         query = TOPIC_QUERIES.get(topic, TOPIC_QUERIES["plan"])
 
         try:
-            raw = fetch_rss(query)
-            items = parse_items(raw)
+            items = fetch_many(query)
             items = dedupe(items)
             items.sort(key=lambda x: x["publishedAt"], reverse=True)
             return self._send_json(200, {
