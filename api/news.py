@@ -22,11 +22,10 @@ TOPIC_QUERIES = {
     # literal word), so topics that need multiple keywords list them
     # separately and the results are fetched per-keyword and merged.
     "plan": ["도시계획", "도시기본계획", "지구단위계획", "공간혁신구역"],
-    "development": ["도시개발", "택지개발", "신도시", "도심복합개발"],
+    "development": ["도시개발", "택지개발", "신도시", "도심복합개발", "물류단지", "데이터센터", "산업단지"],
     "redevelop": ["재개발", "재건축", "정비사업", "노후계획도시"],
     "realestate": ["부동산 정책", "주택공급", "분양가"],
     "national": ["국토교통부", "광역교통", "SOC"],
-    "logistics": ["물류단지", "물류센터", "스마트물류"],
 }
 
 REGION_KEYWORDS = [
