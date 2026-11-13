@@ -87,22 +87,30 @@ def fetch_rss(query, first=1):
         + "&format=rss&first=" + str(first)
     )
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=8) as resp:
+    with urllib.request.urlopen(req, timeout=6) as resp:
         return resp.read()
 
 
 def fetch_many(queries, pages_per_query=3):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    jobs = [(query, 1 + i * 10) for query in queries for i in range(pages_per_query)]
+
+    def _one(job):
+        query, first = job
+        try:
+            raw = fetch_rss(query, first=first)
+        except Exception:
+            return []
+        try:
+            return parse_items(raw)
+        except ET.ParseError:
+            return []
+
     items = []
-    for query in queries:
-        for i in range(pages_per_query):
-            try:
-                raw = fetch_rss(query, first=1 + i * 10)
-            except Exception:
-                continue
-            try:
-                items.extend(parse_items(raw))
-            except ET.ParseError:
-                continue
+    with ThreadPoolExecutor(max_workers=min(8, len(jobs) or 1)) as pool:
+        for fut in as_completed(pool.submit(_one, job) for job in jobs):
+            items.extend(fut.result())
     return items
 
 
