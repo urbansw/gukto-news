@@ -134,7 +134,9 @@
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "unknown error");
       state.cache[topic] = data.items;
-      $("status").textContent = data.items.length + "건 불러옴";
+      let msg = data.items.length + "건 불러옴";
+      if (data.lastUpdated) msg += " · 마지막 수집 " + timeAgo(data.lastUpdated);
+      $("status").textContent = msg;
     } catch (e) {
       state.cache[topic] = [];
       $("status").textContent = "기사를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.";

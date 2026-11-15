@@ -289,6 +289,13 @@ def query_articles(conn, topic, limit=200):
     return out
 
 
+def last_collected(conn, topic):
+    with conn.cursor() as cur:
+        cur.execute("SELECT MAX(collected_at) FROM articles WHERE topic = %s", (topic,))
+        (ts,) = cur.fetchone()
+    return ts.isoformat() if ts else None
+
+
 class handler(BaseHTTPRequestHandler):
     def _send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -311,6 +318,7 @@ class handler(BaseHTTPRequestHandler):
             conn = get_conn(url_env="POSTGRES_URL_NON_POOLING")
             try:
                 items = query_articles(conn, topic)
+                updated_at = last_collected(conn, topic)
             finally:
                 conn.close()
             if items:
@@ -320,6 +328,7 @@ class handler(BaseHTTPRequestHandler):
                     "items": items,
                     "regionLabels": REGION_LABELS,
                     "source": "db",
+                    "lastUpdated": updated_at,
                 })
         except Exception:
             pass  # DB not configured / empty / unreachable — fall through
@@ -336,6 +345,7 @@ class handler(BaseHTTPRequestHandler):
                 "items": items[:80],
                 "regionLabels": REGION_LABELS,
                 "source": "live",
+                "lastUpdated": datetime.now(timezone.utc).isoformat(),
             })
         except Exception as e:  # noqa: BLE001
             return self._send_json(502, {"ok": False, "error": str(e)})
