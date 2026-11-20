@@ -1,13 +1,15 @@
 """Vercel Python serverless function: GET /api/news?topic=plan
 
-Pulls Bing News RSS search results (title, link, source, thumbnail) for a
-fixed set of urban-planning / real-estate-policy topics, classifies each
+Pulls news for a fixed set of urban-planning / real-estate-policy topics
+from two sources -- Bing News RSS (no key needed, has thumbnails) and
+Naver's official News Search API (needs a free NAVER_CLIENT_ID/SECRET,
+much deeper Korean-outlet coverage, no thumbnails) -- classifies each
 item into one of 17 Korean regions by keyword matching on the title,
-dedupes, and returns JSON.
-
-No API key required: this is Bing's public news-search RSS feed, intended
-for personal, non-commercial RSS-reader use per its own feed terms.
+dedupes across both sources, and returns JSON. If the Naver credentials
+aren't configured, that source is silently skipped and Bing alone is used.
 """
+import email.utils
+import html
 import json
 import os
 import re
@@ -91,38 +93,95 @@ def fetch_rss(query, first=1):
         return resp.read()
 
 
+def _naver_creds():
+    cid = os.environ.get("NAVER_CLIENT_ID")
+    secret = os.environ.get("NAVER_CLIENT_SECRET")
+    return (cid, secret) if cid and secret else None
+
+
+def fetch_naver(query, display=30):
+    creds = _naver_creds()
+    if not creds:
+        return {}
+    cid, secret = creds
+    url = (
+        "https://openapi.naver.com/v1/search/news.json?query=" + urllib.parse.quote(query)
+        + "&display=" + str(display) + "&sort=date"
+    )
+    req = urllib.request.Request(url, headers={
+        "X-Naver-Client-Id": cid,
+        "X-Naver-Client-Secret": secret,
+    })
+    with urllib.request.urlopen(req, timeout=6) as resp:
+        return json.loads(resp.read())
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean_naver_text(s):
+    return html.unescape(_TAG_RE.sub("", s or "")).strip()
+
+
+def parse_naver_items(data):
+    out = []
+    for it in data.get("items", []):
+        title = _clean_naver_text(it.get("title"))
+        link = (it.get("originallink") or it.get("link") or "").strip()
+        try:
+            published_at = email.utils.parsedate_to_datetime(it.get("pubDate", "")).astimezone(timezone.utc).isoformat()
+        except Exception:
+            published_at = (it.get("pubDate") or "").strip()
+
+        out.append({
+            "title": title,
+            "link": link,
+            "source": urllib.parse.urlparse(link).netloc.replace("www.", ""),
+            "image": "",
+            "publishedAt": published_at,
+            "region": classify_region(title),
+        })
+    return out
+
+
 def fetch_many(queries, pages_per_query=3):
     return fetch_all_topics({"_": queries}, pages_per_query=pages_per_query)["_"]
 
 
 def fetch_all_topics(topic_queries, pages_per_query=3):
-    """Fetch every (topic, query, page) job across ALL topics in one shared
-    thread pool, instead of one topic at a time — so wall-clock time is
-    roughly one parallel batch, not num_topics batches in a row (this is
-    what kept the daily cron job over Vercel's 60s function limit)."""
+    """Fetch every (source, topic, query, page) job across ALL topics and
+    BOTH sources (Bing RSS + Naver News API) in one shared thread pool,
+    instead of one topic/source at a time — so wall-clock time is roughly
+    one parallel batch, not num_topics batches in a row (this is what kept
+    the daily cron job over Vercel's 60s function limit). Naver jobs are
+    skipped automatically if its API credentials aren't configured."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    jobs = [
-        (topic, query, 1 + i * 10)
+    bing_jobs = [
+        ("bing", topic, query, 1 + i * 10)
         for topic, queries in topic_queries.items()
         for query in queries
         for i in range(pages_per_query)
     ]
+    naver_jobs = [
+        ("naver", topic, query, None)
+        for topic, queries in topic_queries.items()
+        for query in queries
+    ] if _naver_creds() else []
+    jobs = bing_jobs + naver_jobs
 
     def _one(job):
-        _, query, first = job
+        source, _, query, first = job
         try:
-            raw = fetch_rss(query, first=first)
+            if source == "bing":
+                return parse_items(fetch_rss(query, first=first))
+            return parse_naver_items(fetch_naver(query))
         except Exception:
-            return []
-        try:
-            return parse_items(raw)
-        except ET.ParseError:
             return []
 
     by_topic = {topic: [] for topic in topic_queries}
     with ThreadPoolExecutor(max_workers=min(24, len(jobs) or 1)) as pool:
-        futs = {pool.submit(_one, job): job[0] for job in jobs}
+        futs = {pool.submit(_one, job): job[1] for job in jobs}
         for fut in as_completed(futs):
             by_topic[futs[fut]].extend(fut.result())
     return by_topic
