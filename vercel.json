@@ -4,6 +4,6 @@
     "api/cron/*.py": { "memory": 512, "maxDuration": 60 }
   },
   "crons": [
-    { "path": "/api/cron/collect", "schedule": "0 21 * * *" }
+    { "path": "/api/cron/collect", "schedule": "0 0 * * *" }
   ]
 }
